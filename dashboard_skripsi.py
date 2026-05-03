@@ -18,6 +18,22 @@ from scipy.stats import wilcoxon, norm
 from scipy.stats import rankdata
 import pingouin as pg
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_FILE = "app_list.json"
+
+if "app_list" not in st.session_state:
+    st.session_state.app_list = []
+
+    if os.path.exists(APP_FILE):
+        try:
+            st.session_state.app_list = pd.read_json(APP_FILE, typ="series").tolist()
+        except:
+            st.session_state.app_list = []
+
+# Pastikan confirm_reset juga diinisialisasi di sini agar rapi
+if "confirm_reset" not in st.session_state:
+    st.session_state.confirm_reset = False
+
 def interpret_ueq(score):
     if score > 1.5:
         return "Excellent"
@@ -93,7 +109,7 @@ def wilcoxon_full_spss(light, dark):
     ties_count = df["abs"].value_counts()
     tie_sum = np.sum(ties_count**3 - ties_count)
 
-    var_T = (n * (n + 1) * (2*n + 1) - tie_sum) / 24
+    var_T = (n * (n + 1) * (2*n + 1) - 0.5 * tie_sum) / 24
     sd_T = np.sqrt(var_T)
 
    
@@ -104,7 +120,9 @@ def wilcoxon_full_spss(light, dark):
     # ======================
     # 🔥 P-VALUE DARI SCIPY (SUDAH BENAR)
     # ======================
-
+    light_clean = light[df.index]
+    dark_clean = dark[df.index]
+    
     res = wilcoxon(
         light,
         dark,
@@ -126,14 +144,12 @@ def wilcoxon_full_spss(light, dark):
     ties_count = df["abs"].value_counts()
     tie_sum = np.sum(ties_count**3 - ties_count)
 
-    var_T = (n * (n + 1) * (2*n + 1) - tie_sum) / 24
+    var_T = (n * (n + 1) * (2*n + 1) - 0.5 * tie_sum) / 24
     sd_T = np.sqrt(var_T)
 
     # 🔥 SPSS correction logic (FIX)
-    if W < mean_T:
-        correction = +0.5
-    else:
-        correction = -0.5
+    # SPSS secara default tidak menggunakan continuity correction untuk nilai Z
+    correction = 0
 
     z = (W - mean_T + correction) / sd_T
 
@@ -146,7 +162,134 @@ def wilcoxon_full_spss(light, dark):
     })
 
     return ranks_table, stats_table
+
+
+def compute_wilcoxon_pair(light, dark, light_lbl, dark_lbl):
+    """Compute Wilcoxon stats for one pair and return a display-ready dict."""
+    ranks_table, stats_table = wilcoxon_full_spss(light, dark)
+
+    z_val = float(stats_table.iloc[0, 1])
+    p_val = float(stats_table.iloc[1, 1])
+
+    neg_n   = int(ranks_table.iloc[0]["N"])
+    pos_n   = int(ranks_table.iloc[1]["N"])
+    ties_n  = int(ranks_table.iloc[2]["N"])
+    total_n = int(ranks_table.iloc[3]["N"])
+
+    neg_mean = ranks_table.iloc[0]["Mean Rank"]
+    pos_mean = ranks_table.iloc[1]["Mean Rank"]
+    neg_sum  = ranks_table.iloc[0]["Sum of Ranks"]
+    pos_sum  = ranks_table.iloc[1]["Sum of Ranks"]
+
+    def fmt(v, decimals=2):
+        try:
+            return f"{float(v):.{decimals}f}"
+        except (TypeError, ValueError):
+            return ""
+
+    return {
+        "var_name":  f"{dark_lbl} - {light_lbl}",
+        "light_lbl": light_lbl,
+        "dark_lbl":  dark_lbl,
+        "neg_n": neg_n, "pos_n": pos_n, "ties_n": ties_n, "total_n": total_n,
+        "neg_mean": fmt(neg_mean), "pos_mean": fmt(pos_mean),
+        "neg_sum":  fmt(neg_sum),  "pos_sum":  fmt(pos_sum),
+        "z_val": z_val, "p_val": p_val,
+    }
+
+
+def render_spss_wilcoxon(pairs_data):
+    """
+    Render output Wilcoxon identik dengan SPSS Style.
+    Huruf (a-i) hanya muncul jika baris tersebut memiliki nilai N > 0.
+    """
+    ranks_rows = ""
+    footnotes = []
+    abc = "abcdefghijklmnopqrstuvwxyz"
+    fn_idx = 0
+    
+    for pd_item in pairs_data:
+        vn = pd_item["var_name"]
+        l_lbl = pd_item["light_lbl"]
+        d_lbl = pd_item["dark_lbl"]
         
+        # Penampung huruf superscript untuk 3 kategori per Task
+        labels = ["", "", ""] 
+        
+        # Kita definisikan arah hubungan secara statis sesuai urutan SPSS
+        hubungan = [
+            f"{d_lbl} < {l_lbl}", # Negative
+            f"{d_lbl} > {l_lbl}", # Positive
+            f"{l_lbl} = {d_lbl}"  # Ties
+        ]
+        
+        # Cek data N untuk Negative, Positive, dan Ties
+        n_vals = [pd_item['neg_n'], pd_item['pos_n'], pd_item['ties_n']]
+        
+        for i in range(3):
+            # Huruf footnote harus selalu berlanjut (a, b, c...) mengikuti kategori,
+            # tapi tampilannya dikontrol oleh nilai N.
+            current_letter = abc[fn_idx]
+            
+            if n_vals[i] > 0:
+                labels[i] = f"<sup>{current_letter}</sup>"
+                footnotes.append(f"{current_letter}. {hubungan[i]}")
+            
+            fn_idx += 1 # Index huruf tetap naik agar urutan a-i konsisten
+            
+        ranks_rows += f"""
+        <tr>
+            <td rowspan="4" style="border:1px solid #bbb;padding:7px 12px;font-weight:600;
+                background:#f5f5f5;vertical-align:middle;white-space:nowrap;">{vn}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;">Negative Ranks</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['neg_n']}{labels[0]}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['neg_mean']}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['neg_sum']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #bbb;padding:7px 12px;">Positive Ranks</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['pos_n']}{labels[1]}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['pos_mean']}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['pos_sum']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #bbb;padding:7px 12px;">Ties</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;">{pd_item['ties_n']}{labels[2]}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;"></td>
+            <td style="border:1px solid #bbb;padding:7px 12px;"></td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #bbb;padding:7px 12px;font-weight:600;">Total</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;text-align:right;font-weight:600;">{pd_item['total_n']}</td>
+            <td style="border:1px solid #bbb;padding:7px 12px;"></td>
+            <td style="border:1px solid #bbb;padding:7px 12px;"></td>
+        </tr>"""
+
+    footnote_html = "<br>".join(footnotes)
+    
+    # Render gabungan tabel Ranks dan Test Statistics
+    ranks_html = f"""
+    <div style="margin:20px 0 8px 0;">
+        <div style="font-weight:700;font-size:14px;border-bottom:2px solid #333;padding-bottom:4px;margin-bottom:0;">Ranks</div>
+        <table style="border-collapse:collapse;font-size:13px;font-family:Arial,sans-serif;width:100%;">
+            <thead>
+                <tr style="background:#d9d9d9;">
+                    <th colspan="2" style="border:1px solid #aaa;padding:7px 12px;"></th>
+                    <th style="border:1px solid #aaa;padding:7px 12px;text-align:center;">N</th>
+                    <th style="border:1px solid #aaa;padding:7px 12px;text-align:center;">Mean Rank</th>
+                    <th style="border:1px solid #aaa;padding:7px 12px;text-align:center;">Sum of Ranks</th>
+                </tr>
+            </thead>
+            <tbody>{ranks_rows}</tbody>
+        </table>
+        <div style="font-size:11px;color:#444;margin-top:5px;font-style:italic;line-height:1.6;">
+            {footnote_html}
+        </div>
+    </div>"""
+    
+    # (Bagian Test Statistics tetap menggunakan format yang sudah benar sebelumnya)
+    st.markdown(ranks_html, unsafe_allow_html=True)
+
 
 def dataset_manager(df, expected_columns, save_path, title, filename_base):
 
@@ -265,6 +408,7 @@ def dataset_manager(df, expected_columns, save_path, title, filename_base):
 
             st.success("Dataset berhasil diimport.")
             st.rerun()
+            
 
 
 
@@ -331,43 +475,37 @@ st.markdown("""
 /* Kategori Menu */
 .menu-label {
     font-weight: 700;
-    font-size: 9px;
+    font-size: 8px;
     color: #94a3b8;
     text-transform: uppercase;
     letter-spacing: 1.2px;
-    margin-bottom: 4px;
-    margin-top: 12px;
+    margin-bottom: 4px !important;
+    margin-top: 6px !important;
 }
 
 /* Tombol Reset Minimalis */
 .stButton > button {
     width: 100%;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: 11px !important;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     transition: all 0.3s;
+    padding: 6px !important;
 }
 
 [data-testid="stMetricV2"] {
-background-color: white;
+    background-color: white;
+    color: #1e293b;
 }
-/* Memaksa container border memiliki background putih */
 div[data-testid="stVerticalBlockBorderWrapper"] > div {
-background-color: white !important;
+    background-color: white !important;
 }
 
-            
-            
-.block-container{
-max-width:1500px;
-padding-top:70px;
-}
-
-[data-testid="stSidebar"]{
-background:#ffffff;
-border-right:1px solid #e5e7eb;
+.block-container {
+    max-width: 1500px;
+    padding-top: 70px;
 }
 
 /* Tambahkan ini di dalam <style> */
@@ -382,22 +520,22 @@ border-right:1px solid #e5e7eb;
     background: transparent;
 }
 
-.main-title{
-font-size:28px;
-font-weight:600;
-color:#111827;
+.main-title {
+    font-size: 28px;
+    font-weight: 600;
+    color: #111827;
 }
 
-.subtitle{
-color:#6b7280;
-margin-bottom:30px;
+.subtitle {
+    color: #6b7280;
+    margin-bottom: 30px;
 }
 
-.section-title{
-font-size:18px;
-font-weight:600;
-margin-top:40px;
-margin-bottom:15px;
+.section-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 40px;
+    margin-bottom: 15px;
 }
 
 .card {
@@ -412,7 +550,7 @@ margin-bottom:15px;
 
 .card:hover {
     transform: translateY(-5px);
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
     border-color: #6366f1;
 }
 
@@ -456,12 +594,12 @@ margin-bottom:15px;
 
 /* Warna identitas untuk label */
 .val-light {
-    color: #6366f1; /* Indigo */
+    color: #6366f1;
     font-weight: 800;
 }
 
 .val-dark {
-    color: #1e293b; /* Dark Slate */
+    color: #a78bfa;
     font-weight: 800;
 }
 
@@ -471,8 +609,7 @@ margin-bottom:15px;
     font-weight: 400;
     margin: 0 4px;
 }
-            
-/* Tambahkan di dalam blok markdown style Anda */
+
 .pref-card {
     background: #ffffff;
     border: 1px solid #e5e7eb;
@@ -495,9 +632,9 @@ margin-bottom:15px;
 }
 
 h3 {
-    font-size:16px !important;
+    font-size: 16px !important;
 }
-            
+
 .p-card {
     background-color: white;
     padding: 20px;
@@ -507,23 +644,94 @@ h3 {
     margin-bottom: 20px;
 }
 
-/* Hapus space atas sidebar */
-[data-testid="stSidebar"] > div:first-child {
-padding-top: 0rem !important;
-margin-top: 0rem !important;
-}
-
-/* Hapus padding container sidebar */
+/* Kasih jarak normal sidebar */
 [data-testid="stSidebar"] .block-container {
-padding-top: 0rem !important;
+    padding-top: 5px !important;
+    padding-bottom: 5px !important;
 }
 
-/* Paksa semua isi sidebar nempel ke atas */
-section[data-testid="stSidebar"] div:first-child {
-margin-top: 0 !important;
-padding-top: 0 !important;
+/* Biar tiap komponen ga nempel */
+section[data-testid="stSidebar"] .stSelectbox,
+section[data-testid="stSidebar"] .stNumberInput {
+    margin-top: 6px;
+    margin-bottom: 6px !important;
 }
-                
+            
+.sidebar-header h1 {
+    font-size: 18px !important;
+}
+
+.sidebar-header p {
+    font-size: 9px !important;
+}
+
+.sidebar-card {
+    padding: 10px !important;
+    font-size: 10px !important;
+}
+            
+section[data-testid="stSidebar"] > div:first-child {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    
+}
+            
+div[data-baseweb="select"] {
+    margin-top: 4px;
+}
+
+/* Fix jarak label ke input */
+label[data-testid="stWidgetLabel"] {
+    margin-bottom: 4px !important;
+}
+
+/* Khusus sidebar selectbox */
+section[data-testid="stSidebar"] .stSelectbox {
+    margin-bottom: 10px;
+}           
+
+</style>
+""", unsafe_allow_html=True)
+
+# CSS override tema — blok f-string terpisah, hanya berisi aturan tema
+st.markdown(f"""
+<style>
+[data-testid="stSidebar"] {{
+    background: {bg_sidebar} !important;
+    border-right: 1px solid {border} !important;
+}}
+[data-testid="stMetricV2"] {{
+    background-color: {bg_card} !important;
+    color: {text_main} !important;
+}}
+div[data-testid="stVerticalBlockBorderWrapper"] > div {{
+    background-color: {bg_card} !important;
+}}
+.main-title {{ color: {text_main} !important; }}
+.subtitle {{ color: {text_soft} !important; }}
+.card {{
+    background: {bg_card} !important;
+    border-color: {border} !important;
+    color: {text_main} !important;
+}}
+.card b, .card strong {{ color: {text_main} !important; }}
+.card span {{ color: {text_soft} !important; }}
+.card li {{ color: {text_main} !important; }}
+.metric-title {{ color: {text_soft} !important; }}
+.metric-value {{ color: {text_main} !important; }}
+.pref-card {{
+    background: {bg_card} !important;
+    border-color: {border} !important;
+    color: {text_main} !important;
+}}
+.pref-label {{ color: {text_soft} !important; }}
+.pref-value {{ color: {text_main} !important; }}
+.p-card {{
+    background-color: {bg_card} !important;
+    border-color: {border} !important;
+    color: {text_main} !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -551,92 +759,146 @@ def create_donut_chart(data_dict, colors):
     )
     return fig
 
-# ======================
-# SIDEBAR (VERSI SINGLE & CLEAN)
-# ======================
 with st.sidebar:
     st.markdown("""
-    <div class="sidebar-branding">
-        <div class="sidebar-title">Research Analytics</div>
-        <div style="font-size: 11px; color: #6b7280; margin-top: 2px;">Quantitative Data Processor</div>
-    </div>
+        <div style="text-align: center; padding-bottom: 20px;">
+            <h1 style='font-size: 22px; color: #6366f1; margin-bottom: 0;'>🚀 UX Analytics</h1>
+            <p style='font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.5px;'>Research Platform</p>
+        </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<p class="menu-label">Main Navigation</p>', unsafe_allow_html=True)
-    menu = st.selectbox("Nav", 
-                        ["Home", "Overview", "Time on Task", "Error Rate", "UEQ Analysis", "Preferensi Responden"],
-                        label_visibility="collapsed")
+    # --- TAB MANAJEMEN APLIKASI ---
+    st.markdown('<p class="menu-label">Manage Objects</p>', unsafe_allow_html=True)
+    
+    with st.expander("➕ Tambah/Hapus Aplikasi", expanded=len(st.session_state.app_list) == 0):
 
-    st.markdown('<p class="menu-label">Study Parameters</p>', unsafe_allow_html=True)
-    app = st.selectbox("Application", ["Facebook", "Tokopedia"])
-    n = st.number_input("Sample Size (N)", 1, 100, 25)
+    # TAMBAH
+        new_app = st.text_input("Nama Aplikasi Baru", placeholder="Contoh: TikTok")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<p class="menu-label">Data Controls</p>', unsafe_allow_html=True)
+        if st.button("➕ Tambah ke List", use_container_width=True):
+            if new_app and new_app.strip() not in st.session_state.app_list:
+                st.session_state.app_list.append(new_app.strip())
+                pd.Series(st.session_state.app_list).to_json(APP_FILE)
+                st.rerun()
 
-    st.markdown("---")
+        # HAPUS
+        if st.session_state.app_list:
+            st.markdown("### Hapus Aplikasi")
+
+            app_delete = st.selectbox(
+                "Pilih aplikasi yang mau dihapus",
+                st.session_state.app_list,
+                key="delete_app"
+            )
+
+            if st.button("🗑️ Hapus Aplikasi", use_container_width=True):
+
+                st.session_state.app_list.remove(app_delete)
+                pd.Series(st.session_state.app_list).to_json(APP_FILE)
+
+                # 🔥 OPTIONAL: hapus file CSV terkait juga
+                files = [
+                    f"data_tot_{app_delete}.csv",
+                    f"data_error_{app_delete}.csv",
+                    f"data_ueq_light_{app_delete}.csv",
+                    f"data_ueq_dark_{app_delete}.csv",
+                    f"data_pref_{app_delete}.csv"
+                ]
+
+                for f in files:
+                    path = os.path.join(BASE_DIR, f)
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                st.success(f"{app_delete} berhasil dihapus")
+                st.rerun()
+
+    # --- PROTEKSI UTAMA ---
+    # Jika list kosong, tampilkan info dan hentikan eksekusi kode di bawahnya
+    if not st.session_state.app_list:
+        st.info("Silakan tambah aplikasi objek terlebih dahulu di atas.")
+        st.stop() # Menghindari AttributeError: 'NoneType'
+
+    # Pilih aplikasi aktif dari list yang ada
+    app = st.selectbox("Pilih Aplikasi Analisis", st.session_state.app_list)
+    n = st.number_input("Sample Size (N)", min_value=1, max_value=100, value=25)
+
+    # --- DEFINISI FILE (Setelah variabel 'app' pasti ada isinya) ---
+    file_tot = os.path.join(BASE_DIR, f"data_tot_{app}.csv")
+    file_error = os.path.join(BASE_DIR, f"data_error_{app}.csv")
+    file_ueq_light = os.path.join(BASE_DIR, f"data_ueq_light_{app}.csv")
+    file_ueq_dark = os.path.join(BASE_DIR, f"data_ueq_dark_{app}.csv")
+    file_pref = os.path.join(BASE_DIR, f"data_pref_{app}.csv")
+
+    # Project Info Card
     st.markdown(f"""
-    <div style="font-size: 10px; color: #94a3b8; text-align: center;">
-        CURRENT PROJECT<br>
-        <span style="color: #111827; font-weight: 700;">{app.upper()} ANALYSIS</span>
-    </div>
+        <div style="background-color: #f8fafc; padding: 15px; border-radius: 12px; border: 1px solid #e2e8f0; margin: 15px 0;">
+            <p style="font-size: 9px; color: #6366f1; font-weight: 800; margin-bottom: 5px; text-transform: uppercase;">Active Project</p>
+            <p style="font-size: 14px; color: #1e293b; font-weight: 700; margin-bottom: 2px;">{app.upper() if app else "No App"}</p>
+            <p style="font-size: 10px; color: #64748b; line-height: 1.2;">Method: Within-Subjects Design</p>
+        </div>
     """, unsafe_allow_html=True)
+
+    # --- NAVIGASI ---
+    st.markdown('<p class="menu-label">Main Navigation</p>', unsafe_allow_html=True)
+    menu = st.selectbox("Menu", ["Home", "Overview", "Time on Task", "Error Rate", "UEQ Analysis", "Preferensi Responden"], label_visibility="collapsed")
+
+    st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+
+    # --- SECTION 4: DATA CONTROLS ---
+    st.sidebar.markdown("---")
+    st.markdown('<p class="menu-label">System Control</p>', unsafe_allow_html=True)
+    
+    if "confirm_reset" not in st.session_state:
+        st.session_state.confirm_reset = False
+
+    
+
+    if not st.session_state.confirm_reset:
+        if st.button("🗑️ RESET SEMUA DATA", use_container_width=True):
+            st.session_state.confirm_reset = True
+            st.rerun()
+    else:
+        st.markdown("""
+            <div style="background-color: #fef2f2; padding: 10px; border-radius: 8px; border: 1px solid #fee2e2; margin-bottom: 10px;">
+                <p style="font-size: 11px; color: #991b1b; text-align: center; margin: 0;"><b>Hapus semua file .csv?</b></p>
+            </div>
+        """, unsafe_allow_html=True)
+        col_res1, col_res2 = st.columns(2)
+        with col_res1:
+            if st.button("Batal", use_container_width=True):
+                st.session_state.confirm_reset = False
+                st.rerun()
+        with col_res2:
+            if st.button("Ya, Hapus", type="primary", use_container_width=True):
+                # Logika hapus file tetap dipertahankan
+                files_to_delete = [
+                    os.path.join(BASE_DIR, f"data_tot_{app}.csv"),
+                    os.path.join(BASE_DIR, f"data_error_{app}.csv"),
+                    os.path.join(BASE_DIR, f"data_ueq_light_{app}.csv"),
+                    os.path.join(BASE_DIR, f"data_ueq_dark_{app}.csv"),
+                    os.path.join(BASE_DIR, f"preferensi_positif_{app}.csv"),
+                    os.path.join(BASE_DIR, f"preferensi_negatif_{app}.csv")
+                ]
+                for f in files_to_delete:
+                    if os.path.exists(f): os.remove(f)
+                st.session_state.confirm_reset = False
+                st.success("Data direset!")
+                st.rerun()
+
 # ======================
 # FILE
 # ======================
 
-file_tot = f"data_tot_{app}.csv"
-file_error = f"data_error_{app}.csv"
-file_ueq_light = f"data_ueq_light_{app}.csv"
-file_ueq_dark = f"data_ueq_dark_{app}.csv"
-file_pref = f"data_pref_{app}.csv"
-
-st.sidebar.markdown("---")
-
-# ======================
-# RESET DATA SIMPLE (WITH CONFIRMATION)
-# ======================
-
-if "confirm_reset" not in st.session_state:
-    st.session_state.confirm_reset = False
+file_tot = os.path.join(BASE_DIR, f"data_tot_{app}.csv")
+file_error = os.path.join(BASE_DIR, f"data_error_{app}.csv")
+file_ueq_light = os.path.join(BASE_DIR, f"data_ueq_light_{app}.csv")
+file_ueq_dark = os.path.join(BASE_DIR, f"data_ueq_dark_{app}.csv")
+file_pref = os.path.join(BASE_DIR, f"data_pref_{app}.csv")
 
 
-# tombol pertama
-if st.sidebar.button("Reset Semua Data"):
-    st.session_state.confirm_reset = True
 
 
-# konfirmasi
-if st.session_state.confirm_reset:
-
-    st.sidebar.warning("⚠ Semua data penelitian akan dihapus permanen.")
-
-    col1, col2 = st.sidebar.columns(2)
-
-    with col1:
-        if st.button("Batal"):
-            st.session_state.confirm_reset = False
-            st.rerun()
-
-    with col2:
-        if st.button("Ya, Hapus"):
-
-            files_to_delete = [
-                file_tot,
-                file_error,
-                file_ueq_light,
-                file_ueq_dark,
-                f"preferensi_positif_{app}.csv",
-                f"preferensi_negatif_{app}.csv"
-            ]
-
-            for f in files_to_delete:
-                if os.path.exists(f):
-                    os.remove(f)
-
-            st.session_state.confirm_reset = False
-            st.success("Semua data berhasil direset")
-            st.rerun()
 
 # ======================
 # ADJUST RESPONDEN
@@ -898,8 +1160,8 @@ if menu == "Home":
     for col, (title, desc) in zip([col1,col2,col3,col4], steps):
         col.markdown(f"""
         <div class="card">
-            <div style="font-size:13px;font-weight:700;">{title}</div>
-            <div style="font-size:11px;color:#6b7280;margin-top:6px;">
+            <div style="font-size:13px;font-weight:700;color:{text_main}">{title}</div>
+            <div style="font-size:11px;color:{text_soft};margin-top:6px;">
             {desc}
             </div>
         </div>
@@ -912,28 +1174,28 @@ if menu == "Home":
 
     col1, col2, col3 = st.columns(3)
 
-    col1.markdown("""
+    col1.markdown(f"""
     <div class="card">
-    <b>Time on Task</b><br>
-    <span style="font-size:11px;color:#6b7280;">
+    <b style="color:{text_main}">Time on Task</b><br>
+    <span style="font-size:11px;color:{text_soft};">
     Mengukur efisiensi penyelesaian tugas
     </span>
     </div>
     """, unsafe_allow_html=True)
 
-    col2.markdown("""
+    col2.markdown(f"""
     <div class="card">
-    <b>Error Rate</b><br>
-    <span style="font-size:11px;color:#6b7280;">
+    <b style="color:{text_main}">Error Rate</b><br>
+    <span style="font-size:11px;color:{text_soft};">
     Mengukur tingkat kesalahan pengguna
     </span>
     </div>
     """, unsafe_allow_html=True)
 
-    col3.markdown("""
+    col3.markdown(f"""
     <div class="card">
-    <b>UEQ Analysis</b><br>
-    <span style="font-size:11px;color:#6b7280;">
+    <b style="color:{text_main}">UEQ Analysis</b><br>
+    <span style="font-size:11px;color:{text_soft};">
     Evaluasi pengalaman pengguna (UX)
     </span>
     </div>
@@ -946,20 +1208,20 @@ if menu == "Home":
 
     col1, col2 = st.columns(2)
 
-    col1.markdown("""
+    col1.markdown(f"""
     <div class="card">
-    <b>Wilcoxon Test</b><br>
-    <span style="font-size:11px;color:#6b7280;">
+    <b style="color:{text_main}">Wilcoxon Test</b><br>
+    <span style="font-size:11px;color:{text_soft};">
     Untuk Time on Task (non-parametrik)
     </span>
     </div>
     """, unsafe_allow_html=True)
 
-    col2.markdown("""
+    col2.markdown(f"""
     <div class="card">
-    <b>Paired T-Test</b><br>
-    <span style="font-size:11px;color:#6b7280;">
-    Untuk Error Rate & UEQ Analysis
+    <b style="color:{text_main}">Paired T-Test</b><br>
+    <span style="font-size:11px;color:{text_soft};">
+    Untuk Error Rate &amp; UEQ Analysis
     </span>
     </div>
     """, unsafe_allow_html=True)
@@ -969,17 +1231,15 @@ if menu == "Home":
     # ======================
     st.markdown("### Research Use Cases")
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="card">
-
-    <ul style="font-size:12px;color:#374151;line-height:1.8;">
+    <ul style="font-size:12px;color:{text_main};line-height:1.8;">
     <li>Perbandingan Light Mode vs Dark Mode</li>
     <li>Evaluasi redesign UI aplikasi</li>
     <li>Analisis usability fitur baru</li>
     <li>Benchmark antar aplikasi digital</li>
     <li>Eksperimen UX berbasis pengguna</li>
     </ul>
-
     </div>
     """, unsafe_allow_html=True)
 
@@ -1029,8 +1289,8 @@ if menu == "Overview":
     # LOAD DATA PREFERENSI
     # ======================
 
-    file_pos = f"preferensi_positif_{app}.csv"
-    file_neg = f"preferensi_negatif_{app}.csv"
+    file_pos = os.path.join(BASE_DIR, f"preferensi_positif_{app}.csv")
+    file_neg = os.path.join(BASE_DIR, f"preferensi_negatif_{app}.csv")
 
     aspek = {
 
@@ -1761,227 +2021,221 @@ if menu == "Time on Task":
             df_edit.to_csv(file_tot, index=False)
             st.success("✅ Data tersimpan!")
             st.rerun()
-
     # ======================
-# ANALYSIS BUTTON (SAMA PERSIS SEPERTI TOT)
-# ======================
-if st.button("🚀 ANALISIS WILCOXON TEST", type="secondary"):
-    
-    st.markdown("---")
-    st.markdown("### 📊 Overall Metrics")
-    
-    # Calculate MEANS PER RESPONDEN (SAMA SEPERTI TOT)
-    light_err_per_user = df_edit[["Light_T1","Light_T2","Light_T3"]].mean(axis=1)
-    dark_err_per_user = df_edit[["Dark_T1","Dark_T2","Dark_T3"]].mean(axis=1)
-    
-    avg_light_err = light_err_per_user.mean()
-    avg_dark_err = dark_err_per_user.mean()
-    
-    # Per task averages (SAMA SEPERTI TOT)
-    task_avgs = pd.DataFrame({
-        "Task": ["T1", "T2", "T3"],
-        "Light Mode": [
-            df_edit["Light_T1"].mean(),
-            df_edit["Light_T2"].mean(),
-            df_edit["Light_T3"].mean()
-        ],
-        "Dark Mode": [
-            df_edit["Dark_T1"].mean(),
-            df_edit["Dark_T2"].mean(),
-            df_edit["Dark_T3"].mean()
-        ]
-    })
-    
-    # Metrics cards (SAMA SEPERTI TOT)
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
+    # ANALYSIS BUTTON (WILCOXON)
+    # ======================
+    # ... bagian kode sebelumnya ...
+    if st.button("🚀 ANALISIS WILCOXON TEST", type="secondary"):
+        
+        st.markdown("---")
+        st.markdown("### 📊 Overall Metrics")
+        
+        # 1. Hitung rata-rata per responden (untuk distribusi/histogram)
+        light_err_per_user = df_tot[["Light_T1","Light_T2","Light_T3"]].mean(axis=1)
+        dark_err_per_user = df_tot[["Dark_T1","Dark_T2","Dark_T3"]].mean(axis=1)
+        
+        # 2. TAMBAHKAN INI: Hitung rata-rata total untuk perbandingan (skalar)
+        avg_light_err = light_err_per_user.mean()
+        avg_dark_err = dark_err_per_user.mean()
+        
+        # 3. Sekarang variabel avg_light_err sudah tersedia untuk baris ini
         better_mode = "Light" if avg_light_err < avg_dark_err else "Dark"
         color = "normal" if avg_light_err < avg_dark_err else "inverse"
+        
         st.metric(
-            label="Lowest Error Rate", 
+            label="Lowest Time on Task", 
             value=f"{better_mode}",
-            delta=f"{abs(avg_light_err - avg_dark_err):.1f}%",
-            delta_color=color
+            delta=f"{abs(avg_light_err - avg_dark_err):.1f}s"
         )
-    
-    with col2:
-        st.metric(
-            label="Light Mode Avg", 
-            value=f"{avg_light_err:.1f}%"
-        )
-        
-    with col3:
-        st.metric(
-            label="Dark Mode Avg", 
-            value=f"{avg_dark_err:.1f}%"
-        )
-    
-    # ======================
-    # TASK TABLE (SAMA SEPERTI TOT)
-    # ======================
-    st.markdown("### 📋 Task Results")
-    st.dataframe(task_avgs.round(2), use_container_width=True)
-    
-    # ======================
-    # WILCOXON PER TASK (SAMA SEPERTI TOT)
-    # ======================
-    st.markdown("### 📈 Wilcoxon Test Results (SPSS Style)")
-    
-    wilcoxon_results = []
-    z_values = []
-    p_values = []
-    
-    for i in range(1, 4):
-        light = pd.to_numeric(df_edit[f"Light_T{i}"], errors="coerce")
-        dark = pd.to_numeric(df_edit[f"Dark_T{i}"], errors="coerce")
-        
-        ranks_table, stats_table = wilcoxon_full_spss(light, dark)
-        
-        z_val = stats_table.iloc[0, 1]
-        p_val = stats_table.iloc[1, 1]
-        
-        wilcoxon_results.append({
-            "Task": f"T{i}",
-            "Z": round(z_val, 3),
-            "P-value": round(p_val, 3),
-            "Significant": "✅" if p_val < 0.05 else "❌"
+
+
+        # Per task averages
+        task_avgs = pd.DataFrame({
+            "Task": ["T1", "T2", "T3"],
+            "Light Mode": [
+                df_tot["Light_T1"].mean(),
+                df_tot["Light_T2"].mean(),
+                df_tot["Light_T3"].mean()
+            ],
+            "Dark Mode": [
+                df_tot["Dark_T1"].mean(),
+                df_tot["Dark_T2"].mean(),
+                df_tot["Dark_T3"].mean()
+            ]
         })
         
-        z_values.append(z_val)
-        p_values.append(p_val)
-    
-    wilcoxon_df = pd.DataFrame(wilcoxon_results)
-    st.dataframe(wilcoxon_df, use_container_width=True)
-    
-    # ======================
-    # OVERALL WILCOXON (MEAN PER USER - SAMA SEPERTI TOT)
-    # ======================
-    st.markdown("### 📊 Overall Wilcoxon Test (Mean per User)")
-    
-    ranks_table_overall, stats_table_overall = wilcoxon_full_spss(light_err_per_user, dark_err_per_user)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Ranks Table**")
-        st.dataframe(ranks_table_overall, use_container_width=True)
-    
-    with col2:
-        st.markdown("**Statistics**")
-        st.dataframe(stats_table_overall, use_container_width=True)
-    
-    # ======================
-    # VISUALIZATION (SAMA SEPERTI TOT)
-    # ======================
-    st.markdown("### 🎯 Visual Comparison")
-    
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle("Error Rate Analysis", fontsize=16, fontweight='bold')
-    
-    # 1. Per task comparison
-    x = np.arange(3)
-    width = 0.35
-    ax1.bar(x - width/2, task_avgs["Light Mode"], width, label='Light', color="#6366f1", alpha=0.8)
-    ax1.bar(x + width/2, task_avgs["Dark Mode"], width, label='Dark', color="#1e293b", alpha=0.8)
-    ax1.set_title("Per Task Comparison")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(["T1", "T2", "T3"])
-    ax1.set_ylabel("Error Rate (%)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Overall distribution (MEAN PER USER)
-    ax2.hist(light_err_per_user, bins=15, alpha=0.7, color="#6366f1", label='Light', density=True)
-    ax2.hist(dark_err_per_user, bins=15, alpha=0.7, color="#1e293b", label='Dark', density=True)
-    ax2.set_title("Distribution (Mean per User)")
-    ax2.set_xlabel("Error Rate (%)")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. Wilcoxon Z-scores
-    tasks = [f"T{i}" for i in range(1,4)]
-    colors_sig = ["#10b981" if p < 0.05 else "#ef4444" for p in p_values]
-    ax3.bar(tasks, z_values, color=colors_sig, alpha=0.8)
-    ax3.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-    ax3.set_title("Wilcoxon Z-Scores")
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. P-values
-    ax4.bar(tasks, p_values, color=colors_sig, alpha=0.8)
-    ax4.axhline(y=0.05, color='red', linestyle='--', alpha=0.7, label='α=0.05')
-    ax4.set_title("P-Values")
-    ax4.set_ylim(0, max(0.3, max(p_values)*1.1))
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    st.pyplot(fig)
-    
-    # ======================
-    # BENCHMARK CARDS (SAMA SEPERTI TOT)
-    # ======================
-    st.markdown("### 🏆 Benchmark Results")
-    
-    benchmarks = [
-        (avg_light_err, "Light Mode", "#6366f1"),
-        (avg_dark_err, "Dark Mode", "#1e293b")
-    ]
-    
-    col_b1, col_b2 = st.columns(2)
-    
-    for i, (error_rate, label, color) in enumerate(benchmarks):
-        col = col_b1 if i == 0 else col_b2
-        with col:
-            st.markdown(f"""
-                <div style="
-                    display: flex; flex-direction: column; align-items: center;
-                    padding: 25px; background: white; border-radius: 16px; 
-                    border: 2px solid {color}20; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-                    height: 140px; justify-content: center;
-                ">
-                    <div style="font-size: 32px; font-weight: 900; color: {color}; margin-bottom: 8px;">
-                        {error_rate:.1f}%
-                    </div>
-                    <div style="font-size: 14px; color: {color}; font-weight: 600;">
-                        {label}
-                    </div>
-                    <div style="margin-top: 12px; font-size: 12px; color: #10b981; font-weight: 700;">
-                        {'🏆 LOWEST ERROR' if error_rate == min([avg_light_err, avg_dark_err]) else 'Higher Error'}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # ======================
-    # STATISTICAL SUMMARY (SAMA SEPERTI TOT)
-    # ======================
-    significant_tasks = sum(p < 0.05 for p in p_values)
-    overall_p = stats_table_overall.iloc[1, 1] if not pd.isna(stats_table_overall.iloc[1, 1]) else np.nan
-    overall_sig = "✅" if overall_p < 0.05 else "❌"
-    
-    st.markdown("### 📋 Statistical Summary")
-    
-    st.markdown(f"""
-    <div style="
-        background: #f8fafc; padding: 24px; border-radius: 12px; 
-        border-left: 4px solid #6366f1;
-    ">
-        <div style="font-size: 16px; font-weight: 700; color: #1e293b; margin-bottom: 12px;">
-            Overall Findings
-        </div>
-        <ul style="font-size: 14px; color: #374151; line-height: 1.8; margin: 0;">
-            <li><b>{significant_tasks}/3 tasks</b> menunjukkan perbedaan signifikan (p < 0.05)</li>
-            <li><b>Overall Wilcoxon:</b> Z={stats_table_overall.iloc[0,1]:.3f}, p={overall_p:.3f} {overall_sig}</li>
-            <li>Mean Light Mode: <b>{avg_light_err:.1f}%</b></li>
-            <li>Mean Dark Mode: <b>{avg_dark_err:.1f}%</b></li>
-            <li>{'Light Mode lebih akurat' if avg_light_err < avg_dark_err else 'Dark Mode lebih akurat'} secara deskriptif</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    st.caption("*Wilcoxon Signed Ranks Test • SPSS Compatible Output • Mean per User*")
-
+        # Metrics cards
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            better_mode = "Light" if avg_light_err < avg_dark_err else "Dark"
+            color = "normal" if avg_light_err < avg_dark_err else "inverse"
+            st.metric(
+                label="Lowest Time on Task", 
+                value=f"{better_mode}",
+                delta=f"{abs(avg_light_err - avg_dark_err):.1f}s",
+                delta_color=color
+            )
+        
+        with col2:
+            st.metric(
+                label="Light Mode Avg", 
+                value=f"{avg_light_err:.1f}s"
+            )
             
+        with col3:
+            st.metric(
+                label="Dark Mode Avg", 
+                value=f"{avg_dark_err:.1f}s"
+            )
+        
+        # ======================
+        # TASK TABLE
+        # ======================
+        st.markdown("### 📋 Task Results")
+        st.dataframe(task_avgs.round(2), use_container_width=True)
+        
+        # ======================
+        # WILCOXON SPSS OUTPUT - PER TASK
+        # ======================
+        st.markdown("### 📈 Wilcoxon Signed Ranks Test — Per Task")
+
+        pairs_per_task = []
+        z_values = []
+        p_values = []
+        for i in range(1, 4):
+            light = pd.to_numeric(df_tot[f"Light_T{i}"], errors="coerce")
+            dark  = pd.to_numeric(df_tot[f"Dark_T{i}"],  errors="coerce")
+            pd_item = compute_wilcoxon_pair(light, dark, f"Light_T{i}", f"Dark_T{i}")
+            pairs_per_task.append(pd_item)
+            z_values.append(pd_item["z_val"])
+            p_values.append(pd_item["p_val"])
+
+        render_spss_wilcoxon(pairs_per_task)
+
+        # ======================
+        # OVERALL WILCOXON (MEAN PER USER)
+        # ======================
+        st.markdown("### 📊 Overall Wilcoxon Test (Mean per User)")
+        overall_item = compute_wilcoxon_pair(
+            light_err_per_user, dark_err_per_user,
+            "Light (mean)", "Dark (mean)"
+        )
+        render_spss_wilcoxon([overall_item])
+        
+        # ======================
+        # VISUALIZATION
+        # ======================
+        st.markdown("### 🎯 Visual Comparison")
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle("Time on Task Analysis", fontsize=16, fontweight='bold')
+        
+        # 1. Per task comparison
+        x = np.arange(3)
+        width = 0.35
+        ax1.bar(x - width/2, task_avgs["Light Mode"], width, label='Light', color="#6366f1", alpha=0.8)
+        ax1.bar(x + width/2, task_avgs["Dark Mode"], width, label='Dark', color="#1e293b", alpha=0.8)
+        ax1.set_title("Per Task Comparison")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(["T1", "T2", "T3"])
+        ax1.set_ylabel("Time (detik)")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+
+        
+        # 2. Overall distribution (MEAN PER USER)
+        ax2.hist(light_err_per_user.dropna(), bins=15, alpha=0.7, color="#6366f1", label='Light', density=True)
+        ax2.hist(dark_err_per_user.dropna(), bins=15, alpha=0.7, color="#1e293b", label='Dark', density=True)
+        ax2.set_title("Distribution (Mean per User)")
+        ax2.set_xlabel("Time (detik)")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Wilcoxon Z-scores
+        tasks = [f"T{i}" for i in range(1,4)]
+        colors_sig = ["#10b981" if p < 0.05 else "#ef4444" for p in p_values]
+        ax3.bar(tasks, z_values, color=colors_sig, alpha=0.8)
+        ax3.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        ax3.set_title("Wilcoxon Z-Scores")
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. P-values
+        ax4.bar(tasks, p_values, color=colors_sig, alpha=0.8)
+        ax4.axhline(y=0.05, color='red', linestyle='--', alpha=0.7, label='α=0.05')
+        ax4.set_title("P-Values")
+        ax4.set_ylim(0, max(0.3, max(p_values)*1.1))
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        # ======================
+        # BENCHMARK CARDS
+        # ======================
+        st.markdown("### 🏆 Benchmark Results")
+        
+        benchmarks = [
+            (avg_light_err, "Light Mode", "#6366f1"),
+            (avg_dark_err, "Dark Mode", "#1e293b")
+        ]
+        
+        col_b1, col_b2 = st.columns(2)
+        
+        for i, (avg_time, label, color) in enumerate(benchmarks):
+            col = col_b1 if i == 0 else col_b2
+            with col:
+                st.markdown(f"""
+                    <div style="
+                        display: flex; flex-direction: column; align-items: center;
+                        padding: 25px; background: white; border-radius: 16px; 
+                        border: 2px solid {color}20; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                        height: 140px; justify-content: center;
+                    ">
+                        <div style="font-size: 32px; font-weight: 900; color: {color}; margin-bottom: 8px;">
+                            {avg_time:.1f}s
+                        </div>
+                        <div style="font-size: 14px; color: {color}; font-weight: 600;">
+                            {label}
+                        </div>
+                        <div style="margin-top: 12px; font-size: 12px; color: #10b981; font-weight: 700;">
+                            {'🏆 FASTEST' if avg_time == min([avg_light_err, avg_dark_err]) else 'Slower'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        # ======================
+        # STATISTICAL SUMMARY
+        # ======================
+        significant_tasks = sum(p < 0.05 for p in p_values)
+        overall_p   = overall_item["p_val"]
+        overall_z   = overall_item["z_val"]
+        overall_sig = "✅" if overall_p < 0.05 else "❌"
+
+        st.markdown("### 📋 Statistical Summary")
+
+        st.markdown(f"""
+        <div style="
+            background: #f8fafc; padding: 24px; border-radius: 12px;
+            border-left: 4px solid #6366f1;
+        ">
+            <div style="font-size: 16px; font-weight: 700; color: #1e293b; margin-bottom: 12px;">
+                Overall Findings
+            </div>
+            <ul style="font-size: 14px; color: #374151; line-height: 1.8; margin: 0;">
+                <li><b>{significant_tasks}/3 tasks</b> menunjukkan perbedaan signifikan (p &lt; 0.05)</li>
+                <li><b>Overall Wilcoxon:</b> Z={overall_z:.3f}, p={overall_p:.3f} {overall_sig}</li>
+                <li>Mean Light Mode: <b>{avg_light_err:.1f}s</b></li>
+                <li>Mean Dark Mode: <b>{avg_dark_err:.1f}s</b></li>
+                <li>{'Light Mode lebih cepat' if avg_light_err < avg_dark_err else 'Dark Mode lebih cepat'} secara deskriptif</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.caption("*Wilcoxon Signed Ranks Test • SPSS Compatible Output • Mean per User*")
 
 # ======================
 # ERROR RATE (WILCOXON - FIXED)
@@ -2100,54 +2354,36 @@ if menu == "Error Rate":
         st.dataframe(task_avgs.round(2), use_container_width=True)
         
         # ======================
-        # WILCOXON RESULTS
+        # WILCOXON SPSS OUTPUT - PER TASK
         # ======================
-        st.markdown("### 📈 Wilcoxon Test Results (SPSS Style)")
-        
-        wilcoxon_results = []
+        st.markdown("### 📈 Wilcoxon Signed Ranks Test — Per Task")
+
+        pairs_per_task = []
         z_values = []
         p_values = []
-        
         for i in range(1, 4):
             light = pd.to_numeric(df_edit[f"Light_T{i}"], errors="coerce")
-            dark = pd.to_numeric(df_edit[f"Dark_T{i}"], errors="coerce")
-            
-            ranks_table, stats_table = wilcoxon_full_spss(light, dark)
-            
-            z_val = stats_table.iloc[0, 1]
-            p_val = stats_table.iloc[1, 1]
-            
-            wilcoxon_results.append({
-                "Task": f"T{i}",
-                "Z": round(z_val, 3),
-                "P-value": round(p_val, 3),
-                "Significant": "✅" if p_val < 0.05 else "❌"
-            })
-            
-            z_values.append(z_val)
-            p_values.append(p_val)
-        
-        wilcoxon_df = pd.DataFrame(wilcoxon_results)
-        st.dataframe(wilcoxon_df, use_container_width=True)
-        
+            dark  = pd.to_numeric(df_edit[f"Dark_T{i}"],  errors="coerce")
+            pd_item = compute_wilcoxon_pair(light, dark, f"Light_T{i}", f"Dark_T{i}")
+            pairs_per_task.append(pd_item)
+            z_values.append(pd_item["z_val"])
+            p_values.append(pd_item["p_val"])
+
+        render_spss_wilcoxon(pairs_per_task)
+
         # ======================
         # OVERALL WILCOXON (MEAN PER USER)
         # ======================
         st.markdown("### 📊 Overall Wilcoxon Test (Mean per User)")
-        
+
         light_err_per_user = df_edit[["Light_T1","Light_T2","Light_T3"]].mean(axis=1)
-        dark_err_per_user = df_edit[["Dark_T1","Dark_T2","Dark_T3"]].mean(axis=1)
-        
-        ranks_table_overall, stats_table_overall = wilcoxon_full_spss(light_err_per_user, dark_err_per_user)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Ranks Table**")
-            st.dataframe(ranks_table_overall, use_container_width=True)
-        
-        with col2:
-            st.markdown("**Statistics**")
-            st.dataframe(stats_table_overall, use_container_width=True)
+        dark_err_per_user  = df_edit[["Dark_T1","Dark_T2","Dark_T3"]].mean(axis=1)
+
+        overall_item = compute_wilcoxon_pair(
+            light_err_per_user, dark_err_per_user,
+            "Light (mean)", "Dark (mean)"
+        )
+        render_spss_wilcoxon([overall_item])
         
         # ======================
         # VISUALIZATION
@@ -2234,14 +2470,15 @@ if menu == "Error Rate":
         # STATISTICAL SUMMARY
         # ======================
         significant_tasks = sum(p < 0.05 for p in p_values)
-        overall_p = stats_table_overall.iloc[1, 1] if not pd.isna(stats_table_overall.iloc[1, 1]) else np.nan
+        overall_p   = overall_item["p_val"]
+        overall_z   = overall_item["z_val"]
         overall_sig = "✅" if overall_p < 0.05 else "❌"
-        
+
         st.markdown("### 📋 Statistical Summary")
-        
+
         st.markdown(f"""
         <div style="
-            background: #f8fafc; padding: 24px; border-radius: 12px; 
+            background: #f8fafc; padding: 24px; border-radius: 12px;
             border-left: 4px solid #6366f1;
         ">
             <div style="font-size: 16px; font-weight: 700; color: #1e293b; margin-bottom: 12px;">
@@ -2249,14 +2486,14 @@ if menu == "Error Rate":
             </div>
             <ul style="font-size: 14px; color: #374151; line-height: 1.8; margin: 0;">
                 <li><b>{significant_tasks}/3 tasks</b> menunjukkan perbedaan signifikan (p < 0.05)</li>
-                <li><b>Overall Wilcoxon:</b> Z={stats_table_overall.iloc[0,1]:.3f}, p={overall_p:.3f} {overall_sig}</li>
+                <li><b>Overall Wilcoxon:</b> Z={overall_z:.3f}, p={overall_p:.3f} {overall_sig}</li>
                 <li>Mean Light Mode: <b>{avg_light_err:.1f}%</b></li>
                 <li>Mean Dark Mode: <b>{avg_dark_err:.1f}%</b></li>
                 <li>{'Light Mode lebih akurat' if avg_light_err < avg_dark_err else 'Dark Mode lebih akurat'} secara deskriptif</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
-        
+
         st.markdown("---")
         st.caption("*Wilcoxon Signed Ranks Test • SPSS Compatible Output • Mean per User*")
         
@@ -2431,8 +2668,8 @@ if menu == "Preferensi Responden":
     # FILE
     # ======================
 
-    file_pos = f"preferensi_positif_{app}.csv"
-    file_neg = f"preferensi_negatif_{app}.csv"
+    file_pos = os.path.join(BASE_DIR, f"preferensi_positif_{app}.csv")
+    file_neg = os.path.join(BASE_DIR, f"preferensi_negatif_{app}.csv")
 
     # ======================
     # DATAFRAME POSITIF
